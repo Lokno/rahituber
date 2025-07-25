@@ -1,7 +1,92 @@
 #include "TextureManager.h"
 
 #include "file_browser_modal.h"
+
 #include <thread>
+
+#define STB_IMAGE_IMPLEMENTATION
+//#define STBI_NO_JPEG
+//#define STBI_NO_PNG
+//#define STBI_NO_BMP
+#define STBI_NO_PSD
+#define STBI_NO_TGA
+#define STBI_NO_GIF
+#define STBI_NO_HDR
+#define STBI_NO_PIC
+#define STBI_NO_PNM 
+#include "stb_image.h"
+
+#define STB_IMAGE_RESIZE_IMPLEMENTATION
+#include "stb_image_resize2.h"
+
+SDL_Texture* TextureManager::LoadTextureFromFile(SDL_Renderer *renderer, const char *file)
+{
+	int width, height, channels;
+	unsigned char *data = stbi_load(file, &width, &height, &channels, STBI_rgb_alpha);
+
+	if (!data)
+	{
+		SDL_Log("Failed to load image %s: %s", file, stbi_failure_reason());
+		return nullptr;
+	}
+
+	bool needsResize = false;
+
+	int newWidth, newHeight;
+
+	if (_max_texture_size > 0 && _max_texture_size > 0)
+	{
+		if (width > _max_texture_size || height > _max_texture_size)
+		{
+			needsResize = true;
+			float aspectRatio = static_cast<float>(width) / static_cast<float>(height);
+			if (width > height)
+			{
+				newHeight = static_cast<int>(_max_texture_size / aspectRatio);
+				newWidth = _max_texture_size;
+			}
+			else
+			{
+				newWidth = static_cast<int>(_max_texture_size * aspectRatio);
+				newHeight = _max_texture_size;
+			}
+		}
+	}
+
+	if (needsResize)
+	{
+		unsigned char* resizedData = new unsigned char[newWidth * newHeight * 4];
+		stbir_resize_uint8_linear(data, width, height, 0, resizedData, newWidth, newHeight, 0, STBIR_RGBA);
+		stbi_image_free(data);
+		data = resizedData;
+		width = newWidth;
+		height = newHeight;
+
+		stbi_image_free(data);
+	}
+
+	SDL_Surface* surface = SDL_CreateSurfaceFrom(width, height, SDL_PIXELFORMAT_RGBA32, data, width * sizeof(uint32_t));
+	SDL_Texture* texture = SDL_CreateTextureFromSurface(renderer, surface);
+	SDL_DestroySurface(surface);
+
+	if (!texture)
+	{
+		SDL_Log("Failed to create texture from surface: %s", SDL_GetError());
+		return nullptr;
+	}
+
+	return texture;
+}
+
+void TextureManager::SetSmooth(SDL_Texture* texture, int scaleFiltering)
+{
+	if (texture == nullptr)
+		return;
+
+    std::scoped_lock loadLock(_loadMutex);
+	// Third option SDL_ScaleMode::SDL_SCALEMODE_PIXELART is supported in SDL3 and should be considered as an option 
+	SDL_SetTextureScaleMode(texture, scaleFiltering == 0 ? SDL_ScaleMode::SDL_SCALEMODE_NEAREST : SDL_ScaleMode::SDL_SCALEMODE_LINEAR);
+}
 
 void TextureManager::LoadIcons(const std::string& appLocation)
 {
@@ -53,13 +138,9 @@ void TextureManager::LoadIcons(const std::string& appLocation)
 		LoadIcon(appLocation + "res/pin.png", _icons[ICON_PIN]);
 	if (_icons.count(ICON_PIN_OFF) == 0)
 		LoadIcon(appLocation + "res/pin_off.png", _icons[ICON_PIN_OFF]);
-
-	// SDL_FIXME
-	//for (auto& ic : _icons)
-	//	ic.second->setSmooth(true);
 }
 
-sf::Texture* TextureManager::GetTexture(const std::string& path, void* caller, std::string* errString)
+SDL_Texture* TextureManager::GetTexture(const std::string& path, void* caller, std::string* errString)
 {
 	if(errString != nullptr)
 		*errString = "";
@@ -67,14 +148,13 @@ sf::Texture* TextureManager::GetTexture(const std::string& path, void* caller, s
 	if (path.empty())
 		return nullptr;
 
-	sf::Texture* out = nullptr;
+	SDL_Texture* out = nullptr;
 
 	while (_textures.count(path) && _textures[path].busyLoading)
 	{
 		std::this_thread::sleep_for(std::chrono::milliseconds(5));
 	}
 
-	
 	if ( _textures[path].tex != nullptr)
 	{
 		_textures[path].refHolders[caller] = true;
@@ -102,7 +182,8 @@ bool TextureManager::LoadIcon(const std::string& path, SDL_Texture*& storage)
 	{
 		bool success = false;
 		std::string err = "";
-		storage = IMG_LoadTexture(_renderer, path);
+
+		storage = TextureManager::LoadTextureFromFile(_renderer, path.c_str());
 		success = storage != nullptr;
 
 		if (success)
@@ -122,21 +203,22 @@ bool TextureManager::LoadIcon(const std::string& path, SDL_Texture*& storage)
 
 bool TextureManager::LoadTexture(const std::string& path, void* caller, std::string* errString)
 {
-	auto loadingTex = std::make_unique<sf::Texture>();
 	int tries = 5;
+
 	while (tries > 0)
 	{
 		bool success = false;
 		std::string err = "";
 		try
 		{
-			success = loadingTex->loadFromFile(path);
+			std::unique_ptr<SDL_Texture> loadingTex(TextureManager::LoadTextureFromFile(_renderer, path.c_str()));
 
-			if (success)
+			if(loadingTex != nullptr)
 			{
 				std::scoped_lock loadLock(_loadMutex);
 				_textures[path].refHolders[caller] = true;
 				_textures[path].tex = std::move(loadingTex);
+				success = true;
 			}
 		}
 		catch (const std::exception& exc)
@@ -160,10 +242,9 @@ bool TextureManager::LoadTexture(const std::string& path, void* caller, std::str
 				{
 					*errString += "Load error" + err;
 					Vector2i imgDim = GetDimensions(path.c_str());
-					int maxDim = sf::Texture::getMaximumSize();
-					if (imgDim.x > maxDim || imgDim.y > maxDim)
+					if (imgDim.x > _max_texture_size || imgDim.y > _max_texture_size)
 					{
-						*errString += " - Too large. Max: " + std::to_string(maxDim);
+						*errString += " - Too large Size: " + std::to_string(imgDim.x) + "x" + std::to_string(imgDim.y);
 						return false;
 					}
 				}
@@ -215,4 +296,22 @@ SDL_Texture* TextureManager::GetIcon(IconID id)
 		return _icons[id];
 
 	return nullptr;
+}
+
+Vector2i TextureManager::GetDimensions(const char* path) 
+{
+	Vector2i dim;
+	int n, ok = 0;
+    ok = stbi_info(path, &dim.x, &dim.y, &n);
+	return ok ? dim : Vector2i(0, 0);
+}
+
+void TextureManager::SetRenderer(SDL_Renderer* renderer)
+{
+	_renderer = renderer;
+    SDL_PropertiesID props = SDL_GetRendererProperties(_renderer);
+	if( SDL_HasProperty(props, "SDL.renderer.max_texture_size"))
+    {
+        _max_texture_size = SDL_GetNumberProperty(props, "SDL.renderer.max_texture_size", 0);
+    }
 }

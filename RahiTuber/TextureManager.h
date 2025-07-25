@@ -57,10 +57,13 @@ public:
 		ICON_PIN_OFF,
 	};
 
+	void SetRenderer(SDL_Renderer* renderer);
+
+	void SetSmooth(SDL_Texture* texture, int scaleFiltering = 1);
+
 	void LoadIcons(const std::string& appLocation);
 
-	sf::Texture* GetTexture(const std::string& path, void* caller, std::string* errString = nullptr);
-
+	SDL_Texture* GetTexture(const std::string& path, void* caller, std::string* errString = nullptr);
 
 	bool LoadTexture(const std::string& path, void* caller, std::string* errString = nullptr);
 	bool LoadIcon(const std::string& path, SDL_Texture*& storage);
@@ -73,8 +76,14 @@ public:
 
 private:
 
+    SDL_Texture* LoadTextureFromFile(SDL_Renderer *renderer, const char *file);
+
+	SDL_Renderer* _renderer = nullptr;
+
+	int _max_texture_size = 0;
+
 	struct TextureItem {
-		std::unique_ptr<sf::Texture> tex;
+		std::unique_ptr<SDL_Texture> tex;
 		std::map<void*, bool> refHolders;
 		bool busyLoading = false;
 	};
@@ -85,18 +94,5 @@ private:
 
 	std::mutex _loadMutex;
 
-	Vector2i GetDimensions(const char* path) 
-	{
-		std::ifstream in(path);
-		unsigned int width, height;
-
-		in.seekg(16);
-		in.read((char*)&width, 4);
-		in.read((char*)&height, 4);
-
-		width = _ntohl(width);
-		height = _ntohl(height);
-
-		return Vector2i(width, height);
-	}
+	Vector2i GetDimensions(const char* path);
 };
